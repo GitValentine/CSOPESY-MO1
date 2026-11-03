@@ -1,0 +1,15 @@
+# Visual Studio local state and build outputs
+.vs/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.log
+*.tlog/
+csopesy-log.txt
