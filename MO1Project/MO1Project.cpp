@@ -1,3 +1,4 @@
+// Updated 3:00 PM, November 3, 2026 - Kyan, Jek
 
 #include <stdexcept>
 #include <iostream>
@@ -16,6 +17,8 @@
 #include <sstream>
 #include <cstdint>
 #include <unordered_map>
+#include <random>
+#include <cstdlib>
 
 
 using namespace std;
@@ -60,6 +63,18 @@ unsigned long long parseConfigNum(const string& value)
     return number;
 }
 
+// ====================================
+// Random helper (Jek)
+// ====================================
+mt19937_64 rng(random_device{}());
+
+// gives a random number from low to high (both included)
+unsigned long long randomRange(unsigned long long low, unsigned long long high)
+{
+    uniform_int_distribution<unsigned long long> dist(low, high);
+    return dist(rng);
+}
+
 
 // ====================================
 // Instructions and data (Kyan)
@@ -93,24 +108,16 @@ struct Process
     int assignedCore = -1;
     string startTime;
     string finishTime;
+    unsigned long long sleepTicks = 0;   // ticks left for SLEEP
+    unsigned long long delayLeft = 0;    // busy-wait ticks left (delays-per-exec)
 };
 
 // ====================================
-// INSTRUCTION ENGINE 
+// INSTRUCTION ENGINE (Jek)
 // ====================================
-// TODO:
-// 1. Generate instructions for each process.
-// 2. Implement PRINT, DECLARE, ADD, SUBTRACT.
-// 3. Implement FOR loops (maximum nesting: 3).
-// 4. Store variables in process.variables.
-// 5. Store PRINT output in process.logs.
-// 6. Update instruction execution progress.
-// 7. Implement SLEEP and its CPU scheduling behavior.
-// 8. Integrate the instruction engine into cpuSetup().
-// 9. Update instruction progress and process completion.
-// 10. Ensure FCFS and Round Robin still work correctly.
-// VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
-vector<instructions> genInstructions(int count);
+// genInstructions - makes the instruction list of a process (PRINT, DECLARE, ADD, SUBTRACT, SLEEP, FOR)
+// doInstructions  - runs ONE instruction of the process (the one at currInstruction)
+vector<instructions> genInstructions(unsigned long long count);
 void doInstructions(Process& process);
 // ====================================
 // Process creation (Kyan)
@@ -123,40 +130,22 @@ Process createProcess(int pid, const string& name, unsigned long long noOfInstru
     newProcess.pState = "READY";
     newProcess.totalInstructions = noOfInstructions;
     newProcess.currInstruction = 0;
+    newProcess.instructions = genInstructions(noOfInstructions);
     return newProcess;
 }
 
 // ====================================
-// PROCESS SCREENS 
+// PROCESS SCREENS (Jek)
 // ====================================
-// TODO:
-// 1. Implement screen -s to create and attach to a process.
-// 2. Implement screen -r to resume an existing process screen.
-// 3. Implement process-smi to display process information.
-// 4. Display instruction progress and PRINT logs.
-// 5. Implement exit to return to the main console.
-// 6. Prevent reattaching to finished processes.
-// 7. Coordinate screen commands with the main CLI owner.
-// 8. Connect screen commands to the main CLI.
-// 9. Ensure screens work while processes execute in the background.
-// VVVVVVVVVVVVVVVVVVVVVVVV
+// showSMI       - prints the info and logs of a process (process-smi)
+// processScreen - the screen of a process, used by screen -s and screen -r
 void showSMI(const Process& process);
-void processScreen(int pid, vector<Process>&processes, mutex& processMutex); 
+void processScreen(int pid, vector<Process>&processes, mutex& processMutex);
 // ====================================
-// REPORTING AND GENERATION 
+// REPORTING AND GENERATION (Jek)
 // ====================================
-// TODO:
-// 1. Implement report-util to generate csopesy-log.txt.
-// 2. Reuse the existing screenLS reporting information.
-// 3. Display CPU utilization and process states in reports.
-// 4. Generate processes with unique names (p01, p02, etc.).
-// 5. Randomize instruction counts using min-ins and max-ins.
-// 6. Use the existing createProcess() function.
-// 7. Coordinate automatic generation with scheduler owner.
-// 8. Implement scheduler-start and scheduler-stop.
-// 9. Implement CPU ticks and delays-per-exec.
-// 10. Integrate reporting and generation into the main CLI.
-// VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+// utilReport     - prints the utilization report (used by screen -ls and report-util)
+// genAutoProcess - makes a process named p01, p02, ... for scheduler-start
 void utilReport(ostream & output, const vector <Process>&process, const vector<int>&coreSlot);
 Process genAutoProcess(int pid, const Config & config);
 
@@ -172,6 +161,235 @@ string getTimestamp() {
     char buffer[64];
     strftime(buffer, sizeof(buffer), "%m/%d/%Y %I:%M:%S%p", &timeInfo);
     return string(buffer);
+}
+
+// ====================================
+// INSTRUCTION ENGINE functions (Jek)
+// ====================================
+const string varNames[5] = { "x", "y", "z", "a", "b" };
+
+// keeps a number inside the uint16 range (0 to 65535)
+uint16_t clamp16(long long value)
+{
+    if (value < 0)
+    {
+        return 0;
+    }
+    if (value > 65535)
+    {
+        return 65535;
+    }
+    return static_cast<uint16_t>(value);
+}
+
+bool isNumber(const string& text)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+    for (char c : text)
+    {
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// gets the value of a number or a variable
+// a variable that was not declared yet is declared with a value of 0
+uint16_t getValue(Process& process, const string& token)
+{
+    if (isNumber(token))
+    {
+        return clamp16(stoll(token));
+    }
+    if (process.variables.count(token) == 0)
+    {
+        process.variables[token] = 0;
+    }
+    return process.variables[token];
+}
+
+// a random variable name or a random number
+string randomOperand()
+{
+    if (randomRange(0, 1) == 0)
+    {
+        return varNames[randomRange(0, 4)];
+    }
+    return to_string(randomRange(0, 100));
+}
+
+// makes a block of instructions that takes exactly "count" steps to run
+// depth is how many FOR loops we are inside of (max is 3)
+vector<instructions> genBlock(unsigned long long count, int depth)
+{
+    vector<instructions> block;
+    unsigned long long remaining = count;
+
+    while (remaining > 0)
+    {
+        instructions ins;
+        int choice = static_cast<int>(randomRange(0, 5));
+
+        if (choice == 5)
+        {
+            unsigned int repeats = static_cast<unsigned int>(randomRange(2, 4));
+
+            if (depth >= 3 || remaining < repeats)
+            {
+                choice = 0;   // cannot make a FOR here, make a PRINT instead
+            }
+            else
+            {
+                unsigned long long maxBody = remaining / repeats;
+                if (maxBody > 5)
+                {
+                    maxBody = 5;
+                }
+                unsigned long long bodySize = randomRange(1, maxBody);
+
+                ins.type = instructionsType::FOR;
+                ins.repeats = repeats;
+                ins.body = genBlock(bodySize, depth + 1);
+                block.push_back(ins);
+                remaining -= bodySize * repeats;
+                continue;
+            }
+        }
+
+        if (choice == 0)
+        {
+            ins.type = instructionsType::PRINT;   // no args = "Hello world from <process_name>!"
+        }
+        else if (choice == 1)
+        {
+            ins.type = instructionsType::DECLARE;
+            ins.args = { varNames[randomRange(0, 4)], to_string(randomRange(0, 100)) };
+        }
+        else if (choice == 2)
+        {
+            ins.type = instructionsType::ADD;
+            ins.args = { varNames[randomRange(0, 4)], randomOperand(), randomOperand() };
+        }
+        else if (choice == 3)
+        {
+            ins.type = instructionsType::SUBTRACT;
+            ins.args = { varNames[randomRange(0, 4)], randomOperand(), randomOperand() };
+        }
+        else
+        {
+            ins.type = instructionsType::SLEEP;
+            ins.args = { to_string(randomRange(1, 10)) };
+        }
+        block.push_back(ins);
+        remaining--;
+    }
+    return block;
+}
+
+vector<instructions> genInstructions(unsigned long long count)
+{
+    return genBlock(count, 0);
+}
+
+// how many steps a list of instructions takes to run (a FOR counts its body x repeats)
+unsigned long long countSteps(const vector<instructions>& list)
+{
+    unsigned long long total = 0;
+    for (const instructions& ins : list)
+    {
+        if (ins.type == instructionsType::FOR)
+        {
+            total += countSteps(ins.body) * ins.repeats;
+        }
+        else
+        {
+            total++;
+        }
+    }
+    return total;
+}
+
+// finds the instruction for step number "step" (0 is the first step)
+// FOR loops are walked through here, so the process only needs currInstruction to remember where it is
+const instructions* findStep(const vector<instructions>& list, unsigned long long step)
+{
+    for (const instructions& ins : list)
+    {
+        if (ins.type == instructionsType::FOR)
+        {
+            unsigned long long bodySize = countSteps(ins.body);
+            unsigned long long loopSize = bodySize * ins.repeats;
+            if (step < loopSize)
+            {
+                return findStep(ins.body, step % bodySize);
+            }
+            step -= loopSize;
+        }
+        else
+        {
+            if (step == 0)
+            {
+                return &ins;
+            }
+            step--;
+        }
+    }
+    return nullptr;
+}
+
+void doInstructions(Process& process)
+{
+    const instructions* ins = findStep(process.instructions, process.currInstruction);
+    if (ins == nullptr)
+    {
+        return;
+    }
+
+    if (ins->type == instructionsType::PRINT)
+    {
+        string msg = "Hello world from " + process.pName + "!";
+        if (!ins->args.empty())
+        {
+            msg = ins->args[0];
+            if (ins->args.size() > 1)
+            {
+                msg += to_string(getValue(process, ins->args[1]));
+            }
+        }
+        process.logs.push_back("(" + getTimestamp() + ") Core:" + to_string(process.assignedCore) + " \"" + msg + "\"");
+    }
+    else if (ins->type == instructionsType::DECLARE)
+    {
+        process.variables[ins->args[0]] = getValue(process, ins->args[1]);
+    }
+    else if (ins->type == instructionsType::ADD)
+    {
+        long long result = static_cast<long long>(getValue(process, ins->args[1])) + getValue(process, ins->args[2]);
+        process.variables[ins->args[0]] = clamp16(result);
+    }
+    else if (ins->type == instructionsType::SUBTRACT)
+    {
+        long long result = static_cast<long long>(getValue(process, ins->args[1])) - getValue(process, ins->args[2]);
+        process.variables[ins->args[0]] = clamp16(result);
+    }
+    else if (ins->type == instructionsType::SLEEP)
+    {
+        unsigned long long ticks = stoull(ins->args[0]);
+        if (ticks > 255)
+        {
+            ticks = 255;   // SLEEP takes a uint8
+        }
+        if (ticks > 0)
+        {
+            process.sleepTicks = ticks;
+            process.pState = "SLEEPING";   // cpuSetup will free the core
+        }
+    }
 }
 
 // ====================================
@@ -211,7 +429,28 @@ void readyProcesses(vector<Process>& processes, queue<int>& readyQueue, vector<i
     }
 }
 
-void cpuSetup(int cID, vector<Process>& processes, vector<int>& coreSlot)
+// counts down the sleeping processes, the ones that are done go back to the ready queue
+void wakeSleepers(vector<Process>& processes, queue<int>& readyQueue)
+{
+    for (Process& process : processes)
+    {
+        if (process.pState != "SLEEPING")
+        {
+            continue;
+        }
+        if (process.sleepTicks > 0)
+        {
+            process.sleepTicks--;
+        }
+        if (process.sleepTicks == 0)
+        {
+            process.pState = "READY";
+            readyQueue.push(process.pID);
+        }
+    }
+}
+
+void cpuSetup(int cID, vector<Process>& processes, vector<int>& coreSlot, unsigned long long delays)
 {
     int pid = coreSlot[cID];
     if (pid == -1)
@@ -229,9 +468,18 @@ void cpuSetup(int cID, vector<Process>& processes, vector<int>& coreSlot)
         {
             return;
         }
+        // delays-per-exec: busy waiting, the process stays in the core and does nothing
+        if (process.delayLeft > 0)
+        {
+            process.delayLeft--;
+            return;
+        }
+
         if (process.currInstruction < process.totalInstructions)
         {
+            doInstructions(process);   // run the instruction first, then count it
             process.currInstruction++;
+            process.delayLeft = delays;
             //cout << "[Core: " << cID << "] " << process.pName << " executed " << process.currInstruction << "/" << process.totalInstructions << "\n";
         }
 
@@ -240,10 +488,18 @@ void cpuSetup(int cID, vector<Process>& processes, vector<int>& coreSlot)
             process.pState = "FINISHED";
             process.finishTime = getTimestamp();
             process.assignedCore = -1;
+            process.instructions.clear();           // not needed anymore, frees memory
+            process.instructions.shrink_to_fit();
 
             coreSlot[cID] = -1;
             //cout << "Process " << process.pName << " has FINISHED!\n";
             //cout << "Core " << cID << " is now AVAILABLE\n";
+        }
+        else if (process.pState == "SLEEPING")
+        {
+            // SLEEP was just executed, the process leaves the core
+            process.assignedCore = -1;
+            coreSlot[cID] = -1;
         }
         return;
     }
@@ -252,7 +508,8 @@ void cpuSetup(int cID, vector<Process>& processes, vector<int>& coreSlot)
 // ====================================
 // Process Listing (Kyan)
 // ====================================
-void screenLS(const vector<Process>& processes, const vector<int>& coreSlot)
+// this is the old screenLS body, now writes to any stream (console or file)
+void utilReport(ostream& output, const vector<Process>& processes, const vector<int>& coreSlot)
 {
     int coresUtilized = 0;
     for (int pid : coreSlot)
@@ -272,32 +529,155 @@ void screenLS(const vector<Process>& processes, const vector<int>& coreSlot)
         cpuUtil = (static_cast<double>(coresUtilized) / totalCores) * 100;
 
     }
-    cout << "\n CPU Utilization: " << fixed << setprecision(2) << cpuUtil << "%\n";
-    cout << "Cores Used: " << coresUtilized << "\n";
-    cout << "Cores Available: " << coresReady << "\n";
+    output << "\nCPU Utilization: " << fixed << setprecision(2) << cpuUtil << "%\n";
+    output << "Cores Used: " << coresUtilized << "\n";
+    output << "Cores Available: " << coresReady << "\n";
 
-    cout << "\nRunning / Ready Processes: \n";
-
-    for (const Process& p : processes)
-    {
-        if (p.pState != "FINISHED")
-        {
-            cout << p.pName << " | PID: " << p.pID << " | State: " << p.pState << " | " << p.currInstruction << "/" << p.totalInstructions << "\n";
-
-
-        }
-    }
-
-    cout << "\nFinished processes:\n";
+    output << "\n--------------------------------------\n";
+    output << "Running processes:\n";
 
     for (const Process& p : processes)
     {
         if (p.pState == "FINISHED")
         {
-            cout << p.pName << " | PID: " << p.pID << " | FINISHED" << " | " << p.currInstruction << "/" << p.totalInstructions << "\n";
+            continue;
+        }
+        output << p.pName << "  (" << (p.startTime.empty() ? "not started yet" : p.startTime) << ")  ";
+        if (p.pState == "RUNNING")
+        {
+            output << "Core: " << p.assignedCore;
+        }
+        else
+        {
+            output << p.pState;   // READY or SLEEPING
+        }
+        output << "  " << p.currInstruction << " / " << p.totalInstructions << "\n";
+    }
+
+    output << "\nFinished processes:\n";
+
+    for (const Process& p : processes)
+    {
+        if (p.pState == "FINISHED")
+        {
+            output << p.pName << "  (" << p.finishTime << ")  Finished  " << p.currInstruction << " / " << p.totalInstructions << "\n";
         }
     }
+    output << "--------------------------------------\n\n";
+}
+
+void screenLS(const vector<Process>& processes, const vector<int>& coreSlot)
+{
+    utilReport(cout, processes, coreSlot);   // same output as report-util, but on the console
+}
+
+// ====================================
+// Process generation (Jek)
+// ====================================
+// makes a process named p01, p02, ... with a random number of instructions (min-ins to max-ins)
+Process genAutoProcess(int pid, const Config& config)
+{
+    string name = "p";
+    if (pid < 10)
+    {
+        name += "0";
+    }
+    name += to_string(pid);
+    return createProcess(pid, name, randomRange(config.minIns, config.maxIns));
+}
+
+// ====================================
+// PROCESS SCREENS functions (Jek)
+// ====================================
+void clearScreen()
+{
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+void printHeader()
+{
+    cout << "====================================\n";
+    cout << "       CSOPESY OS EMULATOR\n";
+    cout << "====================================\n";
+}
+
+// looks for a process using its ID (the caller must lock processMutex first)
+Process* findProcess(vector<Process>& processes, int pid)
+{
+    for (Process& process : processes)
+    {
+        if (process.pID == pid)
+        {
+            return &process;
+        }
+    }
+    return nullptr;
+}
+
+void showSMI(const Process& process)
+{
+    cout << "\nProcess name: " << process.pName << "\n";
+    cout << "ID: " << process.pID << "\n";
+    cout << "Logs:\n";
+    for (const string& log : process.logs)
+    {
+        cout << log << "\n";
+    }
     cout << "\n";
+
+    if (process.pState == "FINISHED")
+    {
+        cout << "Finished!\n";
+    }
+    else
+    {
+        cout << "Current instruction line: " << process.currInstruction << "\n";
+        cout << "Lines of code: " << process.totalInstructions << "\n";
+    }
+    cout << "\n";
+}
+
+void printProcessInfo(int pid, vector<Process>& processes, mutex& processMutex)
+{
+    lock_guard<mutex> lock(processMutex);
+    Process* process = findProcess(processes, pid);
+    if (process != nullptr)
+    {
+        showSMI(*process);
+    }
+}
+
+void processScreen(int pid, vector<Process>& processes, mutex& processMutex)
+{
+    clearScreen();
+    printProcessInfo(pid, processes, processMutex);
+
+    string command;
+    while (true)
+    {
+        cout << "root:\\> ";
+        if (!getline(cin, command))
+        {
+            return;
+        }
+
+        if (command == "exit")
+        {
+            return;
+        }
+        else if (command == "process-smi")
+        {
+            printProcessInfo(pid, processes, processMutex);
+        }
+        else
+        {
+            cout << "Unknown command. Use process-smi or exit.\n";
+        }
+    }
 }
 
 // ====================================
@@ -313,18 +693,21 @@ int main() {
     vector<int> coreSlot;
     mutex processMutex;
     atomic<bool> runningScheduler{ false };
+    atomic<bool> generating{ false };      // true while scheduler-start is active
+    unsigned long long cpuCycles = 0;      // the CPU tick counter
     thread schedulerThread;
 
-    std::cout << "====================================\n";
-    std::cout << "       CSOPESY OS EMULATOR\n";
-    std::cout << "====================================\n";
+    printHeader();   // banner moved into printHeader()
     std::cout << "System startup successful!\n\n";
 
 
     while (true)
     {
         cout << "root:\\> ";
-        getline(cin, command);
+        if (!getline(cin, command))
+        {
+            break;   // stop when input ends
+        }
 
         if (command == "exit")
         {
@@ -495,6 +878,17 @@ int main() {
 
                         
                         lock_guard<mutex> lock(processMutex);
+
+                        // one loop = one CPU tick
+                        cpuCycles++;
+                        if (generating && cpuCycles % config.processFreq == 0)
+                        {
+                            Process autoProcess = genAutoProcess(nextpID++, config);
+                            processes.push_back(autoProcess);
+                            readyQueue.push(autoProcess.pID);
+                        }
+                        wakeSleepers(processes, readyQueue);
+
                         readyProcesses(processes, readyQueue, coreSlot);
                         for (int c = 0; c < static_cast<int>(coreSlot.size());
                             c++)
@@ -504,7 +898,7 @@ int main() {
                             {
                                 continue;
                             }
-                            cpuSetup(c, processes, coreSlot);
+                            cpuSetup(c, processes, coreSlot, config.delays);   // passes delays-per-exec
 
                             if (coreSlot[c] != pid)
                             {
@@ -551,9 +945,12 @@ int main() {
         {
             cout << "System is not initialized!\n";
         }
+        else if (command == "screen -s" || command == "screen -r")
+        {
+            cout << "Usage: screen -s <process name> | screen -r <process name> | screen -ls\n";
+        }
         else if (command.rfind("screen -s ", 0) == 0)
         {
-            lock_guard<mutex> lock(processMutex);
             string pName = command.substr(10);
             if (pName.empty())
             {
@@ -561,29 +958,60 @@ int main() {
                 continue;
             }
 
-            bool nameAlreadyExists = false;
-            for (const Process& process : processes)
+            int newPid = -1;
             {
-                if (process.pName == pName)
+                lock_guard<mutex> lock(processMutex);
+
+                bool nameAlreadyExists = false;
+                for (const Process& process : processes)
                 {
-                    nameAlreadyExists = true;
-                    break;
+                    if (process.pName == pName)
+                    {
+                        nameAlreadyExists = true;
+                        break;
+                    }
+                }
+                if (nameAlreadyExists)
+                {
+                    cout << "Error: Name already exists! \n";
+                    continue;
+                }
+                Process newProcess = createProcess(nextpID++, pName, randomRange(config.minIns, config.maxIns));
+                processes.push_back(newProcess);
+                readyQueue.push(newProcess.pID);
+                newPid = newProcess.pID;
+            }   // lock is released here, so the screen and the scheduler can both use the processes
+
+            processScreen(newPid, processes, processMutex);
+            clearScreen();
+            printHeader();
+        }
+        else if (command.rfind("screen -r ", 0) == 0)
+        {
+            string pName = command.substr(10);
+            int foundPid = -1;
+            {
+                lock_guard<mutex> lock(processMutex);
+                for (const Process& process : processes)
+                {
+                    if (process.pName == pName && process.pState != "FINISHED")
+                    {
+                        foundPid = process.pID;
+                        break;
+                    }
                 }
             }
-            if (nameAlreadyExists)
-            {
-                cout << "Error: Name already exists! \n";
-                continue;
-            }
-            Process newProcess = createProcess(nextpID++, pName, config.minIns);
-            processes.push_back(newProcess);
-            readyQueue.push(newProcess.pID);
 
-            cout << "\nProcess was created successfully!\n";
-            cout << "Process Name: " << newProcess.pName << "\n";
-            cout << "Process ID: " << newProcess.pID << "\n";
-            cout << "State: " << newProcess.pState << "\n";
-            cout << "Instructions: " << newProcess.currInstruction << " / " << newProcess.totalInstructions << "\n\n";
+            if (foundPid == -1)
+            {
+                cout << "Process " << pName << " not found.\n";
+            }
+            else
+            {
+                processScreen(foundPid, processes, processMutex);
+                clearScreen();
+                printHeader();
+            }
         }
         else if (command == "screen -ls")
         {
@@ -591,9 +1019,46 @@ int main() {
             screenLS(processes, coreSlot);
         }
 
+        else if (command == "scheduler-start")
+        {
+            if (generating)
+            {
+                cout << "Scheduler is already generating processes!\n";
+            }
+            else
+            {
+                generating = true;
+                cout << "Scheduler started: a new process every " << config.processFreq << " CPU cycles.\n";
+            }
+        }
+        else if (command == "scheduler-stop")
+        {
+            if (!generating)
+            {
+                cout << "Scheduler is not generating processes!\n";
+            }
+            else
+            {
+                generating = false;
+                cout << "Scheduler stopped: no more dummy processes will be generated.\n";
+            }
+        }
+        else if (command == "report-util")
+        {
+            lock_guard<mutex> lock(processMutex);
+            ofstream reportFile("csopesy-log.txt");
+            if (!reportFile.is_open())
+            {
+                cout << "Error: could not create csopesy-log.txt\n";
+                continue;
+            }
+            utilReport(reportFile, processes, coreSlot);
+            reportFile.close();
+            cout << "Report generated at csopesy-log.txt!\n";
+        }
         else
         {
-            cout << "Unkown command.\n";
+            cout << "Unknown command.\n";   // fixed typo ("Unkown")
         }
     }
     runningScheduler = false;
