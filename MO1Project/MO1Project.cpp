@@ -934,6 +934,7 @@ int main() {
                                 }
                             }
                         }
+                        readyProcesses(processes, readyQueue, coreSlot);
                     }
                     this_thread::sleep_for(chrono::milliseconds(200));
                         }
