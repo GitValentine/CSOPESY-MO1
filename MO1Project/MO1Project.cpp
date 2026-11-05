@@ -131,6 +131,7 @@ Process createProcess(int pid, const string& name, unsigned long long noOfInstru
     newProcess.totalInstructions = noOfInstructions;
     newProcess.currInstruction = 0;
     newProcess.instructions = genInstructions(noOfInstructions);
+    newProcess.variables["x"] = 0; // Added for submission
     return newProcess;
 }
 
@@ -291,9 +292,26 @@ vector<instructions> genBlock(unsigned long long count, int depth)
     return block;
 }
 
+// Changed for submission demo - Luis
 vector<instructions> genInstructions(unsigned long long count)
 {
-    return genBlock(count, 0);
+    vector<instructions> block;
+    for (unsigned long long i = 0; i < count; ++i)
+    {
+        instructions ins;
+        if (i % 2 == 0) // Even steps: PRINT
+        {
+            ins.type = instructionsType::PRINT;
+            ins.args = { "Value from: ", "x" };
+        }
+        else // Odd steps: ADD
+        {
+            ins.type = instructionsType::ADD;
+            ins.args = { "x", "x", to_string(randomRange(1, 10)) };
+        }
+        block.push_back(ins);
+    }
+    return block;
 }
 
 // how many steps a list of instructions takes to run (a FOR counts its body x repeats)
